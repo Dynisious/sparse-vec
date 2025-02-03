@@ -1,18 +1,17 @@
 //! Defines the [SparseVec] type.
 //!
-//! Last Modified --- 2024-12-30 
-//! Author --- DMorgan
+//! Author --- DMorgan  
+//! Last Modified --- 2025-02-03
 
 use alloc::alloc::Allocator;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::{Index,IndexMut};
-use core::ptr::{self,NonNull};
-use crate::bogus_allocs::BogusAlloc;
 
 /// Sparse list of values.
 ///
 /// Maintains separate lists of indices and values.
+#[derive(Clone)]
 pub struct SparseVec<T, Alloc>
   where Alloc: Allocator {
   /// External indices of each position in `values`.
@@ -20,30 +19,30 @@ pub struct SparseVec<T, Alloc>
   /// # Invariants
   ///
   /// * Parallel array with `values`.
+  /// * Indices are unique.
   /// * Indices are sorted.
-  indices: Vec<usize,BogusAlloc>,
+  indices: Vec<usize,Alloc>,
   /// Stored values.
   ///
   /// # Invariants
   ///
   /// * Parallel array with `indices`.
-  values: Vec<T,BogusAlloc>,
-  /// Allocator of the SparseVec.
-  allocator: Alloc,
+  values: Vec<T,Alloc>,
 }
 
 impl<T, Alloc> SparseVec<T, Alloc>
   where Alloc: Allocator {
   /// Deconstructs a SparseVec into parts.
   ///
-  /// Returns `(Indices: (Pointer, length, capacity), Values: (Pointer, length, capacity), Allocator)`.
-  pub fn into_parts(self) -> ((NonNull<usize>, usize, usize), (NonNull<T>, usize, usize), Alloc) {
-    let indices = unsafe { ptr::read(&self.indices).into_parts() };
-    let values = unsafe { ptr::read(&self.values).into_parts() };
-    let allocator = unsafe { ptr::read(&self.allocator) };
+  /// Returns `(Indices, Values)`.
+  pub const fn into_parts(self) -> (Vec<usize, Alloc>, Vec<T, Alloc>) {
+    use core::ptr;
+
+    let indices = unsafe { ptr::read(&self.indices) };
+    let values = unsafe { ptr::read(&self.values) };
 
     mem::forget(self);
-    (indices,values,allocator)
+    (indices,values)
   }
   /// Constructs a SparseVec from parts.
   ///
@@ -51,29 +50,32 @@ impl<T, Alloc> SparseVec<T, Alloc>
   ///
   /// indices --- External indices of each position in `values`.  
   /// values --- Stored values.  
-  /// allocator --- Allocator of the SparseVec.  
   ///
   /// # Safety
   ///
-  /// * `indices` and `values` must be valid inputs to
-  ///     [`Vec::from_parts_in(<variable>,* , allocator)`][Vec::from_parts_in].
-  pub unsafe fn from_parts_in(indices: (NonNull<usize>, usize, usize),
-                                    values: (NonNull<T>, usize, usize), allocator: Alloc) -> Self {
-    let indices = unsafe { Vec::from_parts_in(indices.0,indices.1,indices.2,BogusAlloc) };
-    let values = unsafe { Vec::from_parts_in(values.0,values.1,values.2,BogusAlloc) };
-
-    Self{indices,values,allocator}
+  /// * `indices` must be unique and sorted.  
+  pub const unsafe fn from_parts(indices: Vec<usize,Alloc>, values: Vec<T,Alloc>) -> Self {
+    Self{indices,values}
   }
   /// Constructs an empty SparseVec.
   ///
   /// # Params
   ///
   /// allocator --- Allocator of the SparseVec.  
-  pub const fn new_in(allocator: Alloc) -> Self {
-    let indices = Vec::new_in(BogusAlloc);
-    let values = Vec::new_in(BogusAlloc);
+  pub fn new_in(allocator: Alloc) -> Self
+    where Alloc: Clone {
+    let indices = Vec::new_in(allocator.clone());
+    let values = Vec::new_in(allocator);
 
-    Self{indices,values,allocator}
+    unsafe { Self::from_parts(indices,values) }
+  }
+  /// Constructs an empty SparseVec.
+  pub fn new() -> Self
+    where Alloc: Default {
+    let indices = Vec::new_in(Alloc::default());
+    let values = Vec::new_in(Alloc::default());
+
+    unsafe { Self::from_parts(indices,values) }
   }
   /// Constructs an empty SparseVec with capacity for `capacity` values.
   ///
@@ -81,14 +83,29 @@ impl<T, Alloc> SparseVec<T, Alloc>
   ///
   /// capacity --- Count of values to reserve space for.  
   /// allocator --- Allocator of the SparseVec.  
-  pub fn with_capacity_in(capacity: usize, allocator: Alloc) -> Self {
-    let indices = BogusAlloc::allocator(Vec::with_capacity_in(capacity,&allocator)).0;
-    let values = BogusAlloc::allocator(Vec::with_capacity_in(capacity,&allocator)).0;
+  pub fn with_capacity_in(capacity: usize, allocator: Alloc) -> Self
+    where Alloc: Clone {
+    let indices = Vec::with_capacity_in(capacity,allocator.clone());
+    let values = Vec::with_capacity_in(capacity,allocator);
 
-    Self{indices,values,allocator}
+    unsafe { Self::from_parts(indices,values) }
+  }
+  /// Constructs an empty SparseVec with capacity for `capacity` values.
+  ///
+  /// # Params
+  ///
+  /// capacity --- Count of values to reserve space for.  
+  pub fn with_capacity(capacity: usize) -> Self
+    where Alloc: Default {
+    let indices = Vec::with_capacity_in(capacity,Alloc::default());
+    let values = Vec::with_capacity_in(capacity,Alloc::default());
+
+    unsafe { Self::from_parts(indices,values) }
   }
   /// Returns the number of stored values.
   pub const fn count(&self) -> usize { self.indices.len() }
+  /// Tests is `self` is empty.
+  pub const fn is_empty(&self) -> bool { self.indices.is_empty() }
   /// Tests if `index` holds a value.
   pub fn is_set(&self, index: usize) -> bool {
     self.indices.as_slice().binary_search(&index).is_ok()
@@ -113,22 +130,14 @@ impl<T, Alloc> SparseVec<T, Alloc>
   ///
   /// See [Vec::reserve].
   pub fn reserve(&mut self, space: usize) {
-    let mut indices = unsafe { BogusAlloc::take(&mut self.indices,&self.allocator) };
-
-    indices.reserve(space);
-    self.indices = BogusAlloc::allocator(indices).0;
-
-    let mut values = unsafe { BogusAlloc::take(&mut self.values,&self.allocator) };
-
-    values.reserve(space);
-    self.values = BogusAlloc::allocator(values).0;
+    self.indices.reserve(space);
+    self.values.reserve(space);
   }
   /// Stores `value` at `index` and returns any previously stored value.
   pub fn set(&mut self, index: usize, value: T) -> Option<T> {
     match self.indices.binary_search(&index) {
       Ok(value_index) => Some(mem::replace(&mut self.values[value_index],value)),
       Err(value_index) => {
-        self.reserve(1); //Reserve space for the new value.
         self.indices.insert(value_index,index);
         self.values.insert(value_index,value);
 
@@ -146,10 +155,16 @@ impl<T, Alloc> SparseVec<T, Alloc>
   }
 }
 
+impl<T,Alloc> Default for SparseVec<T,Alloc>
+  where Alloc: Allocator + Default {
+  fn default() -> Self { Self::new() }
+}
+
 impl<T, Alloc> Index<usize> for SparseVec<T, Alloc>
   where Alloc: Allocator {
   type Output = T;
 
+  #[track_caller]
   fn index(&self, index: usize) -> &Self::Output {
     self.get(index).expect("accessed and empty index")
   }
@@ -157,18 +172,18 @@ impl<T, Alloc> Index<usize> for SparseVec<T, Alloc>
 
 impl<T, Alloc> IndexMut<usize> for SparseVec<T, Alloc>
   where Alloc: Allocator {
+  #[track_caller]
   fn index_mut(&mut self, index: usize) -> &mut Self::Output {
     self.get_mut(index).expect("accessed and empty index")
   }
 }
 
-impl<T, Alloc> Drop for SparseVec<T, Alloc>
-  where Alloc: Allocator {
-  fn drop(&mut self) {
-    unsafe {
-      //Take both Vecs and drop them
-      let _indices = BogusAlloc::take(&mut self.indices,&self.allocator);
-      let _values = BogusAlloc::take(&mut self.values,&self.allocator);
-    }
+impl<T,Alloc> Eq for SparseVec<T,Alloc>
+  where T: Eq, Alloc: Allocator {}
+
+impl<T1,Alloc1,T2,Alloc2> PartialEq<SparseVec<T2,Alloc2>> for SparseVec<T1,Alloc1>
+  where T1: PartialEq<T2>, Alloc1: Allocator, Alloc2: Allocator {
+  fn eq(&self, rhs: &SparseVec<T2,Alloc2>) -> bool {
+    self.indices == rhs.indices && self.values == rhs.values
   }
 }
